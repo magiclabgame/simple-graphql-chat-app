@@ -4,27 +4,69 @@ Description: >
   Magic Backend Game Service () -  - +VERSION+
 
 Resources:
+  IAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+                - appsync.amazonaws.com
+                - events.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: Policy_api-lambda-db
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'dynamodb:BatchGetItem'
+                  - 'dynamodb:BatchWriteItem'
+                  - 'dynamodb:TagResource'
+                  - 'dynamodb:UntagResource'
+                  - 'dynamodb:PutItem'
+                  - 'dynamodb:DeleteItem'
+                  - 'dynamodb:GetItem'
+                  - 'dynamodb:Scan'
+                  - 'dynamodb:Query'
+                  - 'dynamodb:UpdateItem'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogStream'
+                  - 'logs:CreateLogGroup'
+                  - 'logs:PutLogEvents'
+                Resource: '*'
+
   AuthLambda:
     Type: AWS::Lambda::Function
     Properties: 
       Code: 
         ZipFile: |
-          exports.handler = (event, context, callback) => {
+          exports.handler = async (event) => {
+          
+              // NOTE : Kendinize ait bir kimlik doğrulama seçip, userId dönmelisiniz. Ben JWT token çözerek bu işlemi yapıyorum.
+              // NOTE : You should add your own authentication method and return userId. I'm doing this by decrypting the JWT token.
 
-            // NOTE : Kendinize ait bir kimlik doğrulama seçip, userId dönmelisiniz. Ben JWT token çözerek bu işlemi yapıyorum.
-            // NOTE : You should add your own authentication method and return userId. I'm doing this by decrypting the JWT token.
-
-            return {
-              "isAuthorized": true,
-              "resolverContext": {
-                "userId":     'xxxxx'
+              return {
+                isAuthorized: true,
+                resolverContext: {
+                  userId: "xxxx"
+                }
               }
-            }
           };
       Handler: index.handler
       MemorySize: 128
-      Role: !Ref RoleArn
-      Runtime: nodejs12.x
+      Role: !GetAtt IAMRole.Arn
+      Runtime: nodejs14.x
       Timeout: 5
 
   Api:
@@ -71,12 +113,17 @@ Resources:
           groupUserLeave(group_id: String!): GroupUser
         }
 
+        type Query {
+          getGroup(group_id: String): Group
+        }
+
         type Subscription {
           groupMessageSent(group_id: String!): GroupMessage
             @aws_subscribe(mutations: ["groupMessageSend"])
         }
 
         schema {
+          query: Query
           mutation: Mutation
           subscription: Subscription
         }
@@ -106,7 +153,6 @@ Resources:
         - AttributeName: user_id
           KeyType: HASH
       BillingMode: 'PAY_PER_REQUEST'
-      TableName: 'ChatUsers'
       StreamSpecification: 
         StreamViewType: 'NEW_AND_OLD_IMAGES'
       GlobalSecondaryIndexes:
@@ -136,40 +182,40 @@ Resources:
   GroupsTableDataSource:
     Type: AWS::AppSync::DataSource
     Properties: 
-      ApiId: !Ref ApiId
+      ApiId: !GetAtt Api.ApiId
       Name: GroupsTableDataSource
       Type: AMAZON_DYNAMODB
       DynamoDBConfig:
         AwsRegion: !Ref AWS::Region
-        TableName: !Ref GroupsTableName
-      ServiceRoleArn: !Ref RoleArn
+        TableName: !Ref Groups
+      ServiceRoleArn: !GetAtt IAMRole.Arn
 
   GroupUsersTableDataSource:
     Type: AWS::AppSync::DataSource
     Properties: 
-      ApiId: !Ref ApiId
+      ApiId: !GetAtt Api.ApiId
       Name: GroupUsersTableDataSource
       Type: AMAZON_DYNAMODB
       DynamoDBConfig:
         AwsRegion: !Ref AWS::Region
-        TableName: !Ref GroupUsersTableName
-      ServiceRoleArn: !Ref RoleArn
+        TableName: !Ref GroupUsers
+      ServiceRoleArn: !GetAtt IAMRole.Arn
 
   GroupMessagesTableDataSource:
     Type: AWS::AppSync::DataSource
     Properties: 
-      ApiId: !Ref ApiId
+      ApiId: !GetAtt Api.ApiId
       Name: GroupMessagesTableDataSource
       Type: AMAZON_DYNAMODB
       DynamoDBConfig:
         AwsRegion: !Ref AWS::Region
-        TableName: !Ref GroupMessagesTableName
-      ServiceRoleArn: !Ref RoleArn
+        TableName: !Ref GroupMessages
+      ServiceRoleArn: !GetAtt IAMRole.Arn
   
   GroupCreateFunction:
     Type: AWS::AppSync::FunctionConfiguration
     Properties: 
-      ApiId: !Ref ApiId
+      ApiId: !GetAtt Api.ApiId
       DataSourceName: !GetAtt GroupsTableDataSource.Name
       FunctionVersion: 2018-05-29
       Name: GroupCreate
@@ -185,7 +231,7 @@ Resources:
             },
             "attributeValues" : {
               "owner": $util.dynamodb.toDynamoDBJson($context.identity.resolverContext.userId),
-                "created_at": $util.dynamodb.toDynamoDBJson($util.time.nowEpochSeconds())
+              "created_at": $util.dynamodb.toDynamoDBJson($util.time.nowEpochSeconds())
             }
         }'
       ResponseMappingTemplate: '
@@ -197,7 +243,7 @@ Resources:
   GroupGetFunction:
     Type: AWS::AppSync::FunctionConfiguration
     Properties: 
-      ApiId: !Ref ApiId
+      ApiId: !GetAtt Api.ApiId
       DataSourceName: !GetAtt GroupsTableDataSource.Name
       FunctionVersion: 2018-05-29
       Name: GroupGet
@@ -217,7 +263,7 @@ Resources:
   GroupOwnerJoinFunction:
     Type: AWS::AppSync::FunctionConfiguration
     Properties: 
-      ApiId: !Ref ApiId
+      ApiId: !GetAtt Api.ApiId
       DataSourceName: !GetAtt GroupUsersTableDataSource.Name
       FunctionVersion: 2018-05-29
       Name: GroupOwnerJoin
@@ -241,7 +287,7 @@ Resources:
   MessageSendFunction:
     Type: AWS::AppSync::FunctionConfiguration
     Properties: 
-      ApiId: !Ref ApiId
+      ApiId: !GetAtt Api.ApiId
       DataSourceName: !GetAtt GroupMessagesTableDataSource.Name
       FunctionVersion: 2018-05-29
       Name: MessageSend
@@ -274,7 +320,7 @@ Resources:
   UserDeleteFunction:
     Type: AWS::AppSync::FunctionConfiguration
     Properties: 
-      ApiId: !Ref ApiId
+      ApiId: !GetAtt Api.ApiId
       DataSourceName: !GetAtt GroupUsersTableDataSource.Name
       FunctionVersion: 2018-05-29
       Name: UserDelete
@@ -302,7 +348,7 @@ Resources:
   UserGetFunction:
     Type: AWS::AppSync::FunctionConfiguration
     Properties: 
-      ApiId: !Ref ApiId
+      ApiId: !GetAtt Api.ApiId
       DataSourceName: !GetAtt GroupUsersTableDataSource.Name
       FunctionVersion: 2018-05-29
       Name: UserGet
@@ -324,7 +370,7 @@ Resources:
   UserJoinFunction:
     Type: AWS::AppSync::FunctionConfiguration
     Properties: 
-      ApiId: !Ref ApiId
+      ApiId: !GetAtt Api.ApiId
       DataSourceName: !GetAtt GroupUsersTableDataSource.Name
       FunctionVersion: 2018-05-29
       Name: UserJoin
@@ -348,7 +394,7 @@ Resources:
   UserLeaveFunction:
     Type: AWS::AppSync::FunctionConfiguration
     Properties: 
-      ApiId: !Ref ApiId
+      ApiId: !GetAtt Api.ApiId
       DataSourceName: !GetAtt GroupUsersTableDataSource.Name
       FunctionVersion: 2018-05-29
       Name: UserLeave
@@ -372,7 +418,7 @@ Resources:
   GroupMessageSendResolver:
     Type: AWS::AppSync::Resolver
     Properties: 
-      ApiId: !Ref ApiId
+      ApiId: !GetAtt Api.ApiId
       FieldName: groupMessageSend
       Kind: PIPELINE
       PipelineConfig: 
@@ -383,11 +429,13 @@ Resources:
       RequestMappingTemplate: "{}"
       ResponseMappingTemplate: |
           $util.toJson($ctx.result)
+    DependsOn:
+      - ApiSchema
     
   GroupCreateResolver:
     Type: AWS::AppSync::Resolver
     Properties: 
-      ApiId: !Ref ApiId
+      ApiId: !GetAtt Api.ApiId
       FieldName: groupCreate
       Kind: PIPELINE
       PipelineConfig: 
@@ -399,11 +447,13 @@ Resources:
       RequestMappingTemplate: "{}"
       ResponseMappingTemplate: |
           $util.toJson($ctx.result)
+    DependsOn:
+      - ApiSchema
 
   GroupUserJoinResolver:
     Type: AWS::AppSync::Resolver
     Properties: 
-      ApiId: !Ref ApiId
+      ApiId: !GetAtt Api.ApiId
       FieldName: groupUserJoin
       Kind: PIPELINE
       PipelineConfig: 
@@ -414,11 +464,13 @@ Resources:
       RequestMappingTemplate: "{}"
       ResponseMappingTemplate: |
           $util.toJson($ctx.result)
+    DependsOn:
+      - ApiSchema
 
   GroupUserLeaveResolver:
     Type: AWS::AppSync::Resolver
     Properties: 
-      ApiId: !Ref ApiId
+      ApiId: !GetAtt Api.ApiId
       FieldName: groupUserLeave
       Kind: PIPELINE
       PipelineConfig: 
@@ -429,3 +481,6 @@ Resources:
       RequestMappingTemplate: "{}"
       ResponseMappingTemplate: |
           $util.toJson($ctx.result)
+
+    DependsOn:
+      - ApiSchema
