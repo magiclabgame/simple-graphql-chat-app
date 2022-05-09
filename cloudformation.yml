@@ -1,0 +1,431 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: "AWS::Serverless-2016-10-31"
+Description: >
+  Magic Backend Game Service () -  - +VERSION+
+
+Resources:
+  AuthLambda:
+    Type: AWS::Lambda::Function
+    Properties: 
+      Code: 
+        ZipFile: |
+          exports.handler = (event, context, callback) => {
+
+            // NOTE : Kendinize ait bir kimlik doğrulama seçip, userId dönmelisiniz. Ben JWT token çözerek bu işlemi yapıyorum.
+            // NOTE : You should add your own authentication method and return userId. I'm doing this by decrypting the JWT token.
+
+            return {
+              "isAuthorized": true,
+              "resolverContext": {
+                "userId":     'xxxxx'
+              }
+            }
+          };
+      Handler: index.handler
+      MemorySize: 128
+      Role: !Ref RoleArn
+      Runtime: nodejs12.x
+      Timeout: 5
+
+  Api:
+    Type: AWS::AppSync::GraphQLApi
+    Properties: 
+      AuthenticationType: AWS_LAMBDA
+      Name: SimpleChatApp
+      LambdaAuthorizerConfig:
+        AuthorizerResultTtlInSeconds: 900
+        AuthorizerUri: !GetAtt AuthLambda.Arn
+    DependsOn: 
+      - AuthLambda
+
+  ApiSchema:
+    Type: AWS::AppSync::GraphQLSchema
+    Properties: 
+      ApiId: !GetAtt Api.ApiId
+      Definition: |
+        type Group {
+          group_id: String
+          owner: String
+          created_at: AWSTimestamp
+        }
+
+        type GroupMessage {
+          msg_id: String
+          user_id: String
+          group_id: String
+          content: String
+          created_at: AWSTimestamp
+          expired_at: AWSTimestamp
+        }
+
+        type GroupUser {
+          user_id: String
+          group_id: String
+          role: Int
+        }
+
+        type Mutation {
+          groupMessageSend(group_id: String, content: String!): GroupMessage
+          groupCreate: GroupUser
+          groupUserJoin(group_id: String!): GroupUser
+          groupUserLeave(group_id: String!): GroupUser
+        }
+
+        type Subscription {
+          groupMessageSent(group_id: String!): GroupMessage
+            @aws_subscribe(mutations: ["groupMessageSend"])
+        }
+
+        schema {
+          mutation: Mutation
+          subscription: Subscription
+        }
+
+  Groups:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: group_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: group_id
+          KeyType: HASH
+      BillingMode: 'PAY_PER_REQUEST'
+      StreamSpecification: 
+        StreamViewType: 'NEW_AND_OLD_IMAGES'
+
+  GroupUsers:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: user_id
+          AttributeType: S
+        - AttributeName: group_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: user_id
+          KeyType: HASH
+      BillingMode: 'PAY_PER_REQUEST'
+      TableName: 'ChatUsers'
+      StreamSpecification: 
+        StreamViewType: 'NEW_AND_OLD_IMAGES'
+      GlobalSecondaryIndexes:
+        - IndexName: group_id-index
+          KeySchema:
+            - AttributeName: group_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+  GroupMessages:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: msg_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: msg_id
+          KeyType: HASH
+      BillingMode: 'PAY_PER_REQUEST'
+      StreamSpecification: 
+        StreamViewType: 'NEW_AND_OLD_IMAGES'
+      TimeToLiveSpecification:
+        AttributeName: expired_at
+        Enabled: true
+  
+  GroupsTableDataSource:
+    Type: AWS::AppSync::DataSource
+    Properties: 
+      ApiId: !Ref ApiId
+      Name: GroupsTableDataSource
+      Type: AMAZON_DYNAMODB
+      DynamoDBConfig:
+        AwsRegion: !Ref AWS::Region
+        TableName: !Ref GroupsTableName
+      ServiceRoleArn: !Ref RoleArn
+
+  GroupUsersTableDataSource:
+    Type: AWS::AppSync::DataSource
+    Properties: 
+      ApiId: !Ref ApiId
+      Name: GroupUsersTableDataSource
+      Type: AMAZON_DYNAMODB
+      DynamoDBConfig:
+        AwsRegion: !Ref AWS::Region
+        TableName: !Ref GroupUsersTableName
+      ServiceRoleArn: !Ref RoleArn
+
+  GroupMessagesTableDataSource:
+    Type: AWS::AppSync::DataSource
+    Properties: 
+      ApiId: !Ref ApiId
+      Name: GroupMessagesTableDataSource
+      Type: AMAZON_DYNAMODB
+      DynamoDBConfig:
+        AwsRegion: !Ref AWS::Region
+        TableName: !Ref GroupMessagesTableName
+      ServiceRoleArn: !Ref RoleArn
+  
+  GroupCreateFunction:
+    Type: AWS::AppSync::FunctionConfiguration
+    Properties: 
+      ApiId: !Ref ApiId
+      DataSourceName: !GetAtt GroupsTableDataSource.Name
+      FunctionVersion: 2018-05-29
+      Name: GroupCreate
+      RequestMappingTemplate: '
+        #if($context.prev.result.user_id == $context.identity.resolverContext.userId)
+          $util.error("User has group")
+        #end
+
+        {
+            "operation" : "PutItem",
+            "key" : {
+                "group_id": $util.dynamodb.toDynamoDBJson($util.autoId())
+            },
+            "attributeValues" : {
+              "owner": $util.dynamodb.toDynamoDBJson($context.identity.resolverContext.userId),
+                "created_at": $util.dynamodb.toDynamoDBJson($util.time.nowEpochSeconds())
+            }
+        }'
+      ResponseMappingTemplate: '
+        #if($ctx.error)
+            $util.error($ctx.error.message, $ctx.error.type)
+        #end
+        $util.toJson($ctx.result)'
+
+  GroupGetFunction:
+    Type: AWS::AppSync::FunctionConfiguration
+    Properties: 
+      ApiId: !Ref ApiId
+      DataSourceName: !GetAtt GroupsTableDataSource.Name
+      FunctionVersion: 2018-05-29
+      Name: GroupGet
+      RequestMappingTemplate: '
+        {
+            "operation": "GetItem",
+            "key": {
+                "group_id": $util.dynamodb.toDynamoDBJson($context.arguments.group_id),
+            }
+        }'
+      ResponseMappingTemplate: '
+        #if($ctx.error)
+            $util.error($ctx.error.message, $ctx.error.type)
+        #end
+        $util.toJson($ctx.result)'
+
+  GroupOwnerJoinFunction:
+    Type: AWS::AppSync::FunctionConfiguration
+    Properties: 
+      ApiId: !Ref ApiId
+      DataSourceName: !GetAtt GroupUsersTableDataSource.Name
+      FunctionVersion: 2018-05-29
+      Name: GroupOwnerJoin
+      RequestMappingTemplate: '
+        {
+            "operation" : "PutItem",
+            "key" : {
+                "user_id": $util.dynamodb.toDynamoDBJson($context.identity.resolverContext.userId)
+            },
+            "attributeValues" : {
+                "role": $util.dynamodb.toDynamoDBJson(3),
+                "group_id": $util.dynamodb.toDynamoDBJson($context.prev.result.group_id)
+            }
+        }'
+      ResponseMappingTemplate: '
+        #if($ctx.error)
+            $util.error($ctx.error.message, $ctx.error.type)
+        #end
+        $util.toJson($ctx.result)'
+    
+  MessageSendFunction:
+    Type: AWS::AppSync::FunctionConfiguration
+    Properties: 
+      ApiId: !Ref ApiId
+      DataSourceName: !GetAtt GroupMessagesTableDataSource.Name
+      FunctionVersion: 2018-05-29
+      Name: MessageSend
+      RequestMappingTemplate: '
+        #set( $now = $util.time.nowEpochSeconds() )
+        #set( $ex = $now + 846000 ) 
+        #*
+            expired time 10days ^^
+        *#
+
+        {
+            "operation" : "PutItem",
+            "key" : {
+                "msg_id": $util.dynamodb.toDynamoDBJson($util.autoId()),
+            },
+            "attributeValues" : {
+              "user_id": $util.dynamodb.toDynamoDBJson($context.prev.result.user_id),
+              "group_id": $util.dynamodb.toDynamoDBJson($context.prev.result.group_id),
+              "content": $util.dynamodb.toDynamoDBJson($context.arguments.content),
+              "created_at": $util.dynamodb.toDynamoDBJson($now),
+              "expired_at": $util.dynamodb.toDynamoDBJson($ex)
+            }
+        }'
+      ResponseMappingTemplate: '
+        #if($ctx.error)
+          $util.error($ctx.error.message, $ctx.error.type)
+        #end
+        $util.toJson($ctx.result)'
+    
+  UserDeleteFunction:
+    Type: AWS::AppSync::FunctionConfiguration
+    Properties: 
+      ApiId: !Ref ApiId
+      DataSourceName: !GetAtt GroupUsersTableDataSource.Name
+      FunctionVersion: 2018-05-29
+      Name: UserDelete
+      RequestMappingTemplate: '
+        #if( $context.prev.result.role == 1 )
+          $util.error("You are not manager or owner")
+        #end
+
+        #if($context.prev.result.group_id != $context.arguments.group_id)
+          $util.error("You have not this group")
+        #end
+
+        {
+            "operation": "DeleteItem",
+            "key": {
+                "user_id": $util.dynamodb.toDynamoDBJson($context.arguments.user_id),
+            }
+        }'
+      ResponseMappingTemplate: '
+        #if($ctx.error)
+            $util.error($ctx.error.message, $ctx.error.type)
+        #end
+        $util.toJson($ctx.result)'
+    
+  UserGetFunction:
+    Type: AWS::AppSync::FunctionConfiguration
+    Properties: 
+      ApiId: !Ref ApiId
+      DataSourceName: !GetAtt GroupUsersTableDataSource.Name
+      FunctionVersion: 2018-05-29
+      Name: UserGet
+      RequestMappingTemplate: '
+        {
+            "version" : "2017-02-28",
+            "operation" : "GetItem",
+            "key" : {
+                "user_id" : $util.dynamodb.toDynamoDBJson($context.identity.resolverContext.userId)
+            },
+            "consistentRead" : true
+        }'
+      ResponseMappingTemplate: '
+        #if($ctx.error)
+          $util.error($ctx.error.message, $ctx.error.type)
+        #end
+        $util.toJson($ctx.result)'
+    
+  UserJoinFunction:
+    Type: AWS::AppSync::FunctionConfiguration
+    Properties: 
+      ApiId: !Ref ApiId
+      DataSourceName: !GetAtt GroupUsersTableDataSource.Name
+      FunctionVersion: 2018-05-29
+      Name: UserJoin
+      RequestMappingTemplate: '
+        {
+            "operation" : "PutItem",
+            "key" : {
+                "user_id": $util.dynamodb.toDynamoDBJson($context.identity.resolverContext.userId)
+            },
+            "attributeValues" : {
+                "role": $util.dynamodb.toDynamoDBJson(1),
+                "group_id": $util.dynamodb.toDynamoDBJson($context.arguments.group_id)
+            }
+        }'
+      ResponseMappingTemplate: '
+        #if($ctx.error)
+            $util.error($ctx.error.message, $ctx.error.type)
+        #end
+        $util.toJson($ctx.result)'
+            
+  UserLeaveFunction:
+    Type: AWS::AppSync::FunctionConfiguration
+    Properties: 
+      ApiId: !Ref ApiId
+      DataSourceName: !GetAtt GroupUsersTableDataSource.Name
+      FunctionVersion: 2018-05-29
+      Name: UserLeave
+      RequestMappingTemplate: '
+        #if ($context.arguments.group_id != $context.prev.result.group_id)
+          $util.error("group_id is not match")
+        #end
+
+        {
+            "operation" : "DeleteItem",
+            "key" : {
+                "user_id" : $util.dynamodb.toDynamoDBJson($context.identity.resolverContext.userId)
+            }
+        }'
+      ResponseMappingTemplate: '
+        #if($ctx.error)
+            $util.error($ctx.error.message, $ctx.error.type)
+        #end
+        $util.toJson($ctx.result)'
+    
+  GroupMessageSendResolver:
+    Type: AWS::AppSync::Resolver
+    Properties: 
+      ApiId: !Ref ApiId
+      FieldName: groupMessageSend
+      Kind: PIPELINE
+      PipelineConfig: 
+        Functions:
+          - !GetAtt UserGetFunction.FunctionId
+          - !GetAtt MessageSendFunction.FunctionId
+      TypeName: Mutation
+      RequestMappingTemplate: "{}"
+      ResponseMappingTemplate: |
+          $util.toJson($ctx.result)
+    
+  GroupCreateResolver:
+    Type: AWS::AppSync::Resolver
+    Properties: 
+      ApiId: !Ref ApiId
+      FieldName: groupCreate
+      Kind: PIPELINE
+      PipelineConfig: 
+        Functions:
+          - !GetAtt UserGetFunction.FunctionId
+          - !GetAtt GroupCreateFunction.FunctionId
+          - !GetAtt GroupOwnerJoinFunction.FunctionId
+      TypeName: Mutation
+      RequestMappingTemplate: "{}"
+      ResponseMappingTemplate: |
+          $util.toJson($ctx.result)
+
+  GroupUserJoinResolver:
+    Type: AWS::AppSync::Resolver
+    Properties: 
+      ApiId: !Ref ApiId
+      FieldName: groupUserJoin
+      Kind: PIPELINE
+      PipelineConfig: 
+        Functions:
+          - !GetAtt UserGetFunction.FunctionId
+          - !GetAtt UserJoinFunction.FunctionId
+      TypeName: Mutation
+      RequestMappingTemplate: "{}"
+      ResponseMappingTemplate: |
+          $util.toJson($ctx.result)
+
+  GroupUserLeaveResolver:
+    Type: AWS::AppSync::Resolver
+    Properties: 
+      ApiId: !Ref ApiId
+      FieldName: groupUserLeave
+      Kind: PIPELINE
+      PipelineConfig: 
+        Functions:
+          - !GetAtt UserGetFunction.FunctionId
+          - !GetAtt UserLeaveFunction.FunctionId
+      TypeName: Mutation
+      RequestMappingTemplate: "{}"
+      ResponseMappingTemplate: |
+          $util.toJson($ctx.result)
