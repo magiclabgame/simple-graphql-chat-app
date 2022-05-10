@@ -52,7 +52,14 @@ Resources:
       Code: 
         ZipFile: |
           exports.handler = async (event) => {
-          
+
+              const {
+                authorizationToken,
+                requestContext: { apiId, accountId },
+              } = event
+
+              // authorizationToken check !!!
+                  
               // NOTE : Kendinize ait bir kimlik doğrulama seçip, userId dönmelisiniz. Ben JWT token çözerek bu işlemi yapıyorum.
               // NOTE : You should add your own authentication method and return userId. I'm doing this by decrypting the JWT token.
 
